@@ -1,0 +1,8 @@
+Flask
+Flask-Cors
+pandas
+scikit-learn
+numpy
+psycopg2-binary # Use psycopg2-binary for easier installation on Render
+python-dotenv
+gunicorn # Essential for serving Flask apps in production on Render
