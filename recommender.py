@@ -9,17 +9,14 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import psycopg2 
-from psycopg2.extras import DictCursor # Explicitly import DictCursor
+from psycopg2.extras import DictCursor 
 from dotenv import load_dotenv
 import os
 
-# Load environment variables from .env file
+# Load environment variables from .env file FIRST
 load_dotenv()
 
-app = Flask(__name__)
-CORS(app) # Enable CORS for frontend communication
-
-# --- Database configuration from environment variables ---
+# --- Database configuration from environment variables (Defined early) ---
 DB_CONFIG = {
     'host': os.getenv('DB_HOST'),
     'user': os.getenv('DB_USER'),
@@ -29,38 +26,33 @@ DB_CONFIG = {
     'sslmode': 'require' # Or 'prefer' or 'allow' if 'require' causes issues
 }
 
-# Global DataFrame to store food items fetched from DB
+# --- Global DataFrame and model components (must be defined before usage) ---
 df = pd.DataFrame()
 tfidf_vectorizer = None
 cosine_sim = None
-item_indices = pd.Series() # Will be populated after loading data
+item_indices = pd.Series()
 
 
 # --- Function to fetch data from PostgreSQL ---
 def fetch_food_items_from_db():
     print("Python Recommender: Attempting to connect to PostgreSQL database...")
-    conn = None # Initialize conn to None
+    conn = None 
     try:
-        # NEW: Connect using psycopg2
-        conn = psycopg2.connect(**DB_CONFIG)
-        cursor = conn.cursor(cursor_factory=DictCursor) # Use DictCursor
+        conn = psycopg2.connect(**DB_CONFIG) # Use DB_CONFIG here
+        cursor = conn.cursor(cursor_factory=DictCursor) 
         
-        # Adjust this query if you have more relevant columns
-        # Make sure 'description' and 'category' columns exist in your 'products' table in PostgreSQL.
         cursor.execute("SELECT id, name, price, image_url, description, category FROM products")
         
-        items = [dict(row) for row in cursor.fetchall()] # Convert DictRow to standard dict
+        items = [dict(row) for row in cursor.fetchall()] 
         cursor.close()
         conn.close()
         print(f"Python Recommender: Successfully fetched {len(items)} food items from the database.")
         return items
     except Exception as err: 
         print(f"Python Recommender Error: Could not connect to DB or fetch data: {err}")
-        print("Python Recommender: Falling back to dummy data for recommendations.")
-        if conn: # Ensure connection is closed even on error
+        if conn: 
             conn.close()
-        # Fallback to dummy data if DB connection fails
-        # Ensure dummy data matches your actual product structure with description and category
+        print("Python Recommender: Falling back to dummy data for recommendations.")
         return [
             {"id": 1, "name": "Garden Veg Pizza", "price": 14.99, "image_url": "/images/GardernVegPizza.jpg", "description": "A delightful pizza topped with fresh garden vegetables like bell peppers, onions, and olives.", "category": "main, pizza, vegetarian, Italian"},
             {"id": 2, "name": "Cheeseburger Deluxe", "price": 11.50, "image_url": "/images/CheeseBurger.jpeg", "description": "A juicy grilled beef patty topped with melted cheddar, crisp lettuce, fresh tomato, and special sauce.", "category": "main, burger, fast food, American"},
@@ -77,34 +69,30 @@ def fetch_food_items_from_db():
         ]
 
 
-# --- Function to (re)train and save the model ---
-def train_and_save_model():
+# --- Function to (re)train the model ---
+def train_and_save_model(): # Renamed from train_and_save_model for clarity, as it no longer saves to disk
     global tfidf_vectorizer, cosine_sim, df, item_indices
     print("Python Recommender: Fetching data from database for model training...")
     all_food_items = fetch_food_items_from_db()
     
     if not all_food_items:
         print("Python Recommender: No data fetched from database. Cannot train model.")
-        # Clear existing models if data is empty to ensure subsequent calls also fail clearly
         tfidf_vectorizer = None
         cosine_sim = None
-        df = pd.DataFrame() # Ensure df is empty
+        df = pd.DataFrame() 
         item_indices = pd.Series()
         return
 
     df = pd.DataFrame(all_food_items)
     
-    # Ensure 'description' and 'category' columns exist, fill with empty string if not
     if 'description' not in df.columns:
         df['description'] = ''
     if 'category' not in df.columns:
         df['category'] = ''
 
     df['content'] = df['name'] + ' ' + df['description'] + ' ' + df['category']
-    df['content'] = df['content'].fillna('') # Handle potential missing descriptions/categories
+    df['content'] = df['content'].fillna('') 
 
-    # Re-create item_indices based on the fresh data
-    # Ensure all names are lowercase for consistent lookup
     item_indices = pd.Series(df.index, index=df['name'].str.lower()).drop_duplicates()
 
     print("Python Recommender: Training content-based recommendation model...")
@@ -112,36 +100,38 @@ def train_and_save_model():
     tfidf_matrix = tfidf_vectorizer.fit_transform(df['content'])
     cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
 
-    # We are no longer saving to /tmp because it's ephemeral.
-    # The model will be trained in memory on every service startup.
     print("Python Recommender: Model trained successfully in memory.")
 
 
 # --- Function to load the model (now primarily calls train_and_save_model) ---
 def load_model():
-    # This function is simplified to always re-train the model.
-    # This ensures a fresh model with fresh data on every startup.
     print("Python Recommender: Initializing/re-training model on startup...")
     train_and_save_model()
 
 
+# --- CRUCIAL: CALL load_model() DIRECTLY HERE, at the module level ---
+# This ensures the model is loaded/trained when Gunicorn imports the module and before any requests are handled.
+load_model()
+
+# --- Flask app instance definition (after model is loaded) ---
+app = Flask(__name__)
+CORS(app) # Enable CORS for frontend communication
+
+
 # --- Recommendation Logic (using the trained model) ---
 def get_content_based_recommendations(item_name, num_recommendations=3):
-    global df, item_indices, tfidf_vectorizer, cosine_sim # Ensure we use the latest globals
+    global df, item_indices, tfidf_vectorizer, cosine_sim 
 
-    # Check if df is empty or models are not trained
     if df.empty or tfidf_vectorizer is None or cosine_sim is None:
         print("Python Recommender: Model not trained or data not loaded. Cannot provide content-based recommendations.")
-        # If content-based fails, try to return random items from the fetched DF as a fallback
         if not df.empty:
             print("Python Recommender: Falling back to random recommendations from available data.")
-            # Ensure not to return the requested item itself if it exists in DF
             available_items = [item for item in df.to_dict(orient='records') if item['name'].lower() != item_name.lower()]
             if len(available_items) >= num_recommendations:
                 return random.sample(available_items, num_recommendations)
             else:
-                return random.sample(available_items, len(available_items)) # Return all if less than requested
-        return [] # Return empty list if no data at all
+                return random.sample(available_items, len(available_items)) 
+        return []
 
 
     lower_item_name = item_name.lower()
@@ -149,47 +139,44 @@ def get_content_based_recommendations(item_name, num_recommendations=3):
 
     if idx is None:
         print(f"Python Recommender: Item '{item_name}' not found in our dataset for content-based recommendations. Providing random alternatives.")
-        # Fallback to random if item not found, ensure it's not the requested item itself if possible
         available_items = [item for item in df.to_dict(orient='records') if item['name'].lower() != lower_item_name]
         if len(available_items) >= num_recommendations:
             return random.sample(available_items, num_recommendations)
         else:
-            return random.sample(available_items, len(available_items)) # Return all if less than requested
+            return random.sample(available_items, len(available_items)) 
         
 
     print(f"Python Recommender: Generating content-based recommendations for '{item_name}' (index {idx}).")
     sim_scores = list(enumerate(cosine_sim[idx]))
     sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-    sim_scores = sim_scores[1:num_recommendations + 1] # Exclude itself and take top N
+    sim_scores = sim_scores[1:num_recommendations + 1] 
 
     item_indices_for_recs = [i[0] for i in sim_scores]
     recommended_items_data = df.iloc[item_indices_for_recs].to_dict(orient='records')
     print(f"Python Recommender: Raw recommendations before return: {recommended_items_data}")
-    return recommended_items_data # Return full item objects
+    return recommended_items_data
 
 
 @app.route('/')
 def home():
     return "Python Recommender Service is running!"
 
-# ROUTE: /recommend-similar to be called by Node.js backend
 @app.route('/recommend-similar', methods=['GET'])
 def recommend_similar():
-    item_name = request.args.get('item_name') # Get item_name from query parameters
+    item_name = request.args.get('item_name')
 
     if not item_name:
         return jsonify({"error": "Missing 'item_name' query parameter"}), 400
 
     print(f"Python Recommender: Received request for similar items to: {item_name}")
 
-    # Call your ML recommendation logic here
     recommendations = get_content_based_recommendations(item_name)
 
-    # Return full item objects
     return jsonify({"recommendations": recommendations})
 
 
 if __name__ == '__main__':
-    # Load or train model when the application starts
-    load_model() 
+    # This block will still run when recommender.py is executed directly (e.g., for local testing)
+    # It's okay to call load_model again here, it will just re-initialize if not already
+    # For Render deployment, load_model() above this block ensures it runs
     app.run(host='0.0.0.0', port=os.getenv('PORT', 5000), debug=True)
