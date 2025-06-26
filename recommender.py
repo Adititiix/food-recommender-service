@@ -1,4 +1,6 @@
 # D:\food_rank_recommender_py\recommender.py
+from flask import Flask, request, jsonify # <-- ADD Flask here
+from flask_cors import CORS
 import pandas as pd
 import random
 import pickle
@@ -9,6 +11,7 @@ import psycopg2
 from psycopg2 import extras # Explicitly import 'extras' or 'DictCursor' from psycopg2
 from dotenv import load_dotenv
 import os
+
 
 # Load environment variables from .env file
 # Ensure this .env file exists in the root of your Python project for Render
